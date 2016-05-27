@@ -6,6 +6,7 @@ import (
 	"regexp"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/service/elastictranscoder"
 	"github.com/hashicorp/terraform/helper/schema"
 )
@@ -140,32 +141,15 @@ func pipelineOutputConfig() *schema.Schema {
 func resourceAwsElasticTranscoderPipelineCreate(d *schema.ResourceData, meta interface{}) error {
 	elastictranscoderconn := meta.(*AWSClient).elastictranscoderconn
 
-	req := &elastictranscoder.CreatePipelineInput{}
-
-	if key, ok := d.GetOk("aws_kms_key_arn"); ok {
-		req.AwsKmsKeyArn = aws.String(key.(string))
-	}
-
-	if cc, ok := d.GetOk("content_config"); ok {
-		req.ContentConfig = expandETPiplineOutputConfig(cc.(*schema.Set))
-	}
-
-	req.InputBucket = aws.String(d.Get("input_bucket").(string))
-
-	req.Name = aws.String(d.Get("name").(string))
-
-	if n, ok := d.GetOk("notifications"); ok {
-		req.Notifications = expandETNotifications(n.(*schema.Set))
-	}
-
-	if ob, ok := d.GetOk("output_bucket"); ok {
-		req.OutputBucket = aws.String(ob.(string))
-	}
-
-	req.Role = aws.String(d.Get("role").(string))
-
-	if tc, ok := d.GetOk("thumbnail_config"); ok {
-		req.ThumbnailConfig = expandETPiplineOutputConfig(tc.(*schema.Set))
+	req := &elastictranscoder.CreatePipelineInput{
+		AwsKmsKeyArn:    getStringPtr(d, "aws_kms_key_arn"),
+		ContentConfig:   expandETPiplineOutputConfig(d, "content_config"),
+		InputBucket:     aws.String(d.Get("input_bucket").(string)),
+		Name:            getStringPtr(d, "name"),
+		Notifications:   expandETNotifications(d),
+		OutputBucket:    getStringPtr(d, "output_bucket"),
+		Role:            getStringPtr(d, "role"),
+		ThumbnailConfig: expandETPiplineOutputConfig(d, "thumbnail_config"),
 	}
 
 	if (req.OutputBucket == nil && (req.ContentConfig == nil || req.ContentConfig.Bucket == nil)) ||
@@ -176,7 +160,7 @@ func resourceAwsElasticTranscoderPipelineCreate(d *schema.ResourceData, meta int
 	log.Printf("[DEBUG] Elastic Transcoder Pipeline create opts: %s", req)
 	resp, err := elastictranscoderconn.CreatePipeline(req)
 	if err != nil {
-		return fmt.Errorf("Error creating Elastic Transcoder pipeline: %s", err)
+		return fmt.Errorf("Error creating Elastic Transcoder Pipeline: %s", err)
 	}
 
 	d.SetId(*resp.Pipeline.Id)
@@ -188,32 +172,25 @@ func resourceAwsElasticTranscoderPipelineCreate(d *schema.ResourceData, meta int
 	return resourceAwsElasticTranscoderPipelineUpdate(d, meta)
 }
 
-func expandETNotifications(s *schema.Set) *elastictranscoder.Notifications {
-	notifications := &elastictranscoder.Notifications{}
-
-	if s.Len() == 0 {
+func expandETNotifications(d *schema.ResourceData) *elastictranscoder.Notifications {
+	set, ok := d.GetOk("notifications")
+	if !ok {
 		return nil
 	}
 
-	n := s.List()[0].(map[string]interface{})
-
-	if c, ok := n["completed"]; ok {
-		notifications.Completed = aws.String(c.(string))
+	s := set.(*schema.Set)
+	if s == nil || s.Len() == 0 {
+		return nil
 	}
 
-	if e, ok := n["error"]; ok {
-		notifications.Error = aws.String(e.(string))
-	}
+	m := s.List()[0].(map[string]interface{})
 
-	if p, ok := n["progressing"]; ok {
-		notifications.Progressing = aws.String(p.(string))
+	return &elastictranscoder.Notifications{
+		Completed:   getStringPtr(m, "completed"),
+		Error:       getStringPtr(m, "error"),
+		Progressing: getStringPtr(m, "progressing"),
+		Warning:     getStringPtr(m, "warning"),
 	}
-
-	if w, ok := n["warning"]; ok {
-		notifications.Warning = aws.String(w.(string))
-	}
-
-	return notifications
 }
 
 func flattenETNotifications(n *elastictranscoder.Notifications) []map[string]interface{} {
@@ -235,88 +212,56 @@ func flattenETNotifications(n *elastictranscoder.Notifications) []map[string]int
 		return nil
 	}
 
-	m := make(map[string]interface{})
+	m := setMap(make(map[string]interface{}))
 
-	if n.Completed != nil {
-		m["completed"] = *n.Completed
-	}
-
-	if n.Error != nil {
-		m["error"] = *n.Error
-	}
-
-	if n.Progressing != nil {
-		m["progressing"] = *n.Progressing
-	}
-
-	if n.Warning != nil {
-		m["warning"] = *n.Warning
-	}
-
-	return []map[string]interface{}{m}
+	m.SetString("completed", n.Completed)
+	m.SetString("error", n.Error)
+	m.SetString("progressing", n.Progressing)
+	m.SetString("warning", n.Warning)
+	return m.MapList()
 }
 
-func expandETPiplineOutputConfig(s *schema.Set) *elastictranscoder.PipelineOutputConfig {
-	cfg := &elastictranscoder.PipelineOutputConfig{}
+func expandETPiplineOutputConfig(d *schema.ResourceData, key string) *elastictranscoder.PipelineOutputConfig {
+	set, ok := d.GetOk(key)
+	if !ok {
+		return nil
+	}
 
-	if s.Len() == 0 {
+	s := set.(*schema.Set)
+	if s == nil || s.Len() == 0 {
 		return nil
 	}
 
 	cc := s.List()[0].(map[string]interface{})
 
-	if bucket, ok := cc["bucket"]; ok {
-		cfg.Bucket = aws.String(bucket.(string))
-	}
-
-	if perms, ok := cc["permissions"]; ok {
-		cfg.Permissions = expandETPermList(perms.(*schema.Set))
-	}
-
-	if sc, ok := cc["storage_class"]; ok {
-		cfg.StorageClass = aws.String(sc.(string))
+	cfg := &elastictranscoder.PipelineOutputConfig{
+		Bucket:       getStringPtr(cc, "bucket"),
+		Permissions:  expandETPermList(cc["permissions"].(*schema.Set)),
+		StorageClass: getStringPtr(cc, "storage_class"),
 	}
 
 	return cfg
 }
 
 func flattenETPipelineOutputConfig(cfg *elastictranscoder.PipelineOutputConfig) []map[string]interface{} {
-	m := make(map[string]interface{})
+	m := setMap(make(map[string]interface{}))
 
-	if cfg.Bucket != nil {
-		m["bucket"] = *cfg.Bucket
-	}
+	m.SetString("bucket", cfg.Bucket)
+	m.Set("permissions", flattenETPermList(cfg.Permissions))
+	m.SetString("storage_class", cfg.StorageClass)
 
-	if cfg.Permissions != nil {
-		m["permissions"] = flattenETPermList(cfg.Permissions)
-	}
-
-	if cfg.StorageClass != nil {
-		m["storage_class"] = *cfg.StorageClass
-	}
-
-	return []map[string]interface{}{m}
+	return m.MapList()
 }
 
 func expandETPermList(permissions *schema.Set) []*elastictranscoder.Permission {
 	var perms []*elastictranscoder.Permission
 
 	for _, p := range permissions.List() {
-		permMap := p.(map[string]interface{})
-		perm := &elastictranscoder.Permission{}
-
-		if a, ok := permMap["access"]; ok {
-			perm.Access = expandStringList(a.([]interface{}))
+		perm := &elastictranscoder.Permission{
+			Access:      getStringPtrList(p.(map[string]interface{}), "access"),
+			Grantee:     getStringPtr(p, "grantee"),
+			GranteeType: getStringPtr(p, "grantee_type"),
 		}
-
-		if g, ok := permMap["grantee"]; ok {
-			perm.Grantee = aws.String(g.(string))
-		}
-
-		if gt, ok := permMap["grantee_type"]; ok {
-			perm.GranteeType = aws.String(gt.(string))
-		}
-
 		perms = append(perms, perm)
 	}
 	return perms
@@ -352,35 +297,31 @@ func resourceAwsElasticTranscoderPipelineUpdate(d *schema.ResourceData, meta int
 	}
 
 	if d.HasChange("aws_kms_key_arn") {
-		// not required, check for empty string
-		key := d.Get("aws_kms_key_arn").(string)
-		if key != "" {
-			req.AwsKmsKeyArn = aws.String(key)
-		}
+		req.AwsKmsKeyArn = getStringPtr(d, "aws_kms_key_arn")
 	}
 
 	if d.HasChange("content_config") {
-		req.ContentConfig = expandETPiplineOutputConfig(d.Get("content_config").(*schema.Set))
+		req.ContentConfig = expandETPiplineOutputConfig(d, "content_config")
 	}
 
 	if d.HasChange("input_bucket") {
-		req.Role = aws.String(d.Get("input_bucket").(string))
+		req.Role = getStringPtr(d, "input_bucket")
 	}
 
 	if d.HasChange("name") {
-		req.Name = aws.String(d.Get("name").(string))
+		req.Name = getStringPtr(d, "name")
 	}
 
 	if d.HasChange("notifications") {
-		req.Notifications = expandETNotifications(d.Get("notifications").(*schema.Set))
+		req.Notifications = expandETNotifications(d)
 	}
 
 	if d.HasChange("role") {
-		req.Role = aws.String(d.Get("role").(string))
+		req.Role = getStringPtr(d, "role")
 	}
 
 	if d.HasChange("thumbnail_config") {
-		req.ThumbnailConfig = expandETPiplineOutputConfig(d.Get("thumbnail_config").(*schema.Set))
+		req.ThumbnailConfig = expandETPiplineOutputConfig(d, "thumbnail_config")
 	}
 
 	log.Printf("[DEBUG] Updating Elastic Transcoder Pipeline: %#v", req)
@@ -404,9 +345,11 @@ func resourceAwsElasticTranscoderPipelineRead(d *schema.ResourceData, meta inter
 	})
 
 	if err != nil {
-		// FIXME: check for NOT FOUND
-		d.SetId("")
-		return nil
+		if err, ok := err.(awserr.Error); ok && err.Code() == "ResourceNotFoundException" {
+			d.SetId("")
+			return nil
+		}
+		return err
 	}
 
 	log.Printf("[DEBUG] Elastic Transcoder Pipeline Read response: %#v", resp)
@@ -428,7 +371,6 @@ func resourceAwsElasticTranscoderPipelineRead(d *schema.ResourceData, meta inter
 
 	notifications := flattenETNotifications(pipeline.Notifications)
 	if notifications != nil {
-		log.Println("[XXXX] NOTIFICATIONS", notifications)
 		d.Set("notifications", notifications)
 	}
 
@@ -456,4 +398,115 @@ func resourceAwsElasticTranscoderPipelineDelete(d *schema.ResourceData, meta int
 		return err
 	}
 	return nil
+}
+
+// getStringPtr returns a *string version of the value taken from m, where m
+// can be a map[string]interface{} or a *schema.ResourceData. If the key isn't
+// present, getNilString returns nil.
+func getStringPtr(m interface{}, key string) *string {
+	switch m := m.(type) {
+	case map[string]interface{}:
+		if v, ok := m[key]; ok {
+			s := v.(string)
+			return &s
+		}
+	case *schema.ResourceData:
+		if v, ok := m.GetOk(key); ok {
+			s := v.(string)
+			return &s
+		}
+	default:
+		panic("unknown type in getStringPtr")
+	}
+	return nil
+}
+
+// getStringPtrList returns a []*string version of the map value. If the key
+// isn't present, getNilStringList returns nil.
+func getStringPtrList(m map[string]interface{}, key string) []*string {
+	if v, ok := m[key]; ok {
+		var stringList []*string
+		for _, i := range v.([]interface{}) {
+			s := i.(string)
+			stringList = append(stringList, &s)
+		}
+
+		return stringList
+	}
+	return nil
+}
+
+// a convenience wrapper type for the schema.Set map[string]interface{}
+// Set operations only alter the underlying map if the value is not nil
+type setMap map[string]interface{}
+
+// SetString sets m[key] = *value only if `value != nil`
+func (s setMap) SetString(key string, value *string) {
+	if value == nil {
+		return
+	}
+
+	s[key] = *value
+}
+
+// SetStringMap sets key to value as a map[string]interface{}, skipping any nil
+// values. the value parameter can be a map[string]interface{}, a
+// map[string]*string, or a map[string]string.
+func (s setMap) SetStringMap(key string, value interface{}) {
+	if value == nil {
+		return
+	}
+
+	m := make(map[string]interface{})
+
+	switch value := value.(type) {
+	case map[string]string:
+		for k, v := range value {
+			m[k] = v
+		}
+	case map[string]*string:
+		for k, v := range value {
+			if v == nil {
+				continue
+			}
+			m[k] = *v
+		}
+	case map[string]interface{}:
+		for k, v := range value {
+			if v == nil {
+				continue
+			}
+
+			switch v := v.(type) {
+			case string:
+				m[k] = v
+			case *string:
+				if v != nil {
+					m[k] = *v
+				}
+			default:
+				panic(fmt.Sprintf("unknown type for SetString: %T", v))
+			}
+		}
+	}
+
+	s[key] = m
+}
+
+func (s setMap) Set(key string, value interface{}) {
+	if value == nil {
+		return
+	}
+
+	s[key] = value
+}
+
+// Map returns the raw map type for a shorter type conversion
+func (s setMap) Map() map[string]interface{} {
+	return map[string]interface{}(s)
+}
+
+// MapList returns the map[string]interface{} in a slice to match the schema.Set data type
+func (s setMap) MapList() []map[string]interface{} {
+	return []map[string]interface{}{s.Map()}
 }
